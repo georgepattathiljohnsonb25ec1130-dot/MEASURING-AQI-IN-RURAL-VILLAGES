@@ -1,0 +1,219 @@
+import csv
+import os
+import torch
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
+os.environ["HF_TOKEN"] = "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"
+
+
+# -------------------- LOAD GPT-2 ONCE --------------------
+print("Loading AI model... (first run may take 1–2 minutes)")
+
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+model.eval()
+
+print("AI model ready!")
+
+def local_chatbot(prompt):
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=800
+    )
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=120,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.9,
+            repetition_penalty=1.4,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    if text.startswith(prompt):
+        text = text[len(prompt):].strip()
+
+    return text.strip()
+
+
+# -------------------- DATA HANDLING --------------------
+def load_data(filename):
+    data = []
+    with open(filename, "r", encoding="utf-8-sig", errors="ignore") as f:
+        delimiter = "\t" if "\t" in f.read(1024) else ","
+        f.seek(0)
+        reader = csv.reader(f, delimiter=delimiter)
+        for row in reader:
+            if any(cell.strip() for cell in row):
+                data.append([cell.strip() for cell in row])
+    if not data:
+        raise ValueError("File is empty or delimiter is wrong")
+    return data[0], data[1:]
+
+def get_villages(rows):
+    return sorted(set(row[1] for row in rows))
+
+def filter_by_village(rows, village):
+    return [r for r in rows if r[1].lower() == village.lower()]
+
+def filter_by_year(rows, year):
+    return [r for r in rows if r[0] == str(year)]
+
+def calculate_total_row(row):
+    total = 0
+    for v in row[2:]:
+        try:
+            total += float(v)
+        except:
+            pass
+    return round(total, 2)
+
+def severity_label(value):
+    if value <= 50: return "Good"
+    if value <= 100: return "Moderate"
+    if value <= 150: return "Unhealthy (Sensitive)"
+    if value <= 200: return "Unhealthy"
+    if value <= 300: return "Very Unhealthy"
+    return "Severe"
+
+def predict_next_year(rows, col_index):
+    vals = [(int(r[0]), float(r[col_index])) for r in rows if r[col_index]]
+    if len(vals) < 2: return 0
+    vals.sort()
+    return round(vals[-1][1] + (vals[-1][1] - vals[-2][1]), 2)
+
+
+# -------------------- GUI APP --------------------
+class PollutionApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("Village Pollution & ML Predictor")
+        root.geometry("1200x700")
+        root.configure(bg="#001f3f")
+
+        self.header = []
+        self.rows = []
+        self.current_village_rows = []
+
+        self.title_font = ("Courier", 20, "bold")
+        self.label_font = ("Courier", 12)
+        self.button_font = ("Courier", 12, "bold")
+
+        tk.Button(
+            root, text="Load DATA.txt",
+            font=self.button_font,
+            bg="#0074D9", fg="white",
+            command=self.load_file
+        ).pack(pady=10)
+
+        self.village_combo = ttk.Combobox(root, state="readonly")
+        self.village_combo.bind("<<ComboboxSelected>>", self.village_selected)
+        self.village_combo.pack()
+
+        self.buttons_frame = tk.Frame(root, bg="#001f3f")
+        self.buttons_frame.pack(pady=5)
+
+        self.table_frame = tk.Frame(root)
+        self.table_frame.pack(fill="both", expand=True)
+
+    def load_file(self):
+        file = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+        if not file: return
+        self.header, self.rows = load_data(file)
+        self.village_combo["values"] = get_villages(self.rows)
+        messagebox.showinfo("Loaded", "Data loaded successfully")
+
+    def village_selected(self, _):
+        v = self.village_combo.get()
+        self.current_village_rows = filter_by_village(self.rows, v)
+        self.show_buttons()
+        self.show_table(self.current_village_rows)
+
+    def show_buttons(self):
+        for w in self.buttons_frame.winfo_children():
+            w.destroy()
+        for text, cmd in [
+            ("All Data", self.show_all),
+            ("By Year", self.by_year),
+            ("Predict 2026", self.predict),
+            ("Graphs", self.graphs),
+            ("Ask AI", self.chatbot)
+        ]:
+            tk.Button(
+                self.buttons_frame, text=text,
+                font=self.button_font,
+                bg="#0074D9", fg="white",
+                command=cmd
+            ).pack(side="left", padx=5)
+
+    def show_table(self, data):
+        for w in self.table_frame.winfo_children():
+            w.destroy()
+        cols = self.header + ["Total", "Severity"]
+        tree = ttk.Treeview(self.table_frame, columns=cols, show="headings")
+        tree.pack(fill="both", expand=True)
+        for c in cols:
+            tree.heading(c, text=c)
+        for r in data:
+            t = calculate_total_row(r)
+            tree.insert("", "end", values=r + [t, severity_label(t)])
+
+    def show_all(self):
+        self.show_table(self.current_village_rows)
+
+    def by_year(self):
+        y = tk.simpledialog.askstring("Year", "Enter year")
+        if not y: return
+        self.show_table(filter_by_year(self.current_village_rows, y))
+
+    def predict(self):
+        row = ["2026", self.village_combo.get()]
+        for i in range(2, len(self.header)):
+            row.append(predict_next_year(self.current_village_rows, i))
+        self.show_table(self.current_village_rows + [row])
+
+    def graphs(self):
+        win = tk.Toplevel(self.root)
+        fig, ax = plt.subplots()
+        years = [int(r[0]) for r in self.current_village_rows]
+        for i in range(2, len(self.header)):
+            ax.plot(years, [float(r[i]) for r in self.current_village_rows], label=self.header[i])
+        ax.legend()
+        FigureCanvasTkAgg(fig, win).get_tk_widget().pack(fill="both", expand=True)
+
+    def chatbot(self):
+        win = tk.Toplevel(self.root)
+        win.geometry("600x500")
+        entry = tk.Entry(win)
+        entry.pack(fill="x")
+        text = tk.Text(win)
+        text.pack(fill="both", expand=True)
+
+        def ask():
+            q = entry.get().strip()
+            if not q: return
+            df = pd.DataFrame(self.current_village_rows, columns=self.header)
+            prompt = f"Answer clearly using this data:\n{df}\nQuestion: {q}"
+            a = local_chatbot(prompt)
+            text.insert("end", f"You: {q}\nAI: {a}\n\n")
+            entry.delete(0, "end")
+
+        tk.Button(win, text="Ask", command=ask).pack()
+
+
+# -------------------- RUN --------------------
+root = tk.Tk()
+PollutionApp(root)
+root.mainloop()
